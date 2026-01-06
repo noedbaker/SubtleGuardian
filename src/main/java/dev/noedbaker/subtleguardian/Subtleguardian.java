@@ -20,6 +20,8 @@ import java.util.concurrent.ThreadLocalRandom;
 import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.network.chat.Component;
 
+import net.fabricmc.fabric.api.event.lifecycle.v1.ServerTickEvents;
+
 
 public class Subtleguardian implements ModInitializer {
 	public static final String MOD_ID = "subtleguardian";
@@ -40,7 +42,7 @@ public class Subtleguardian implements ModInitializer {
 		//1: prevent lethal damage
 
 		ServerLivingEntityEvents.ALLOW_DEATH.register((LivingEntity entity, DamageSource source, float damageAmount) -> {
-
+		
 
 			//only apply to players
 			if (!(entity instanceof Player player)) return true;
@@ -49,8 +51,12 @@ public class Subtleguardian implements ModInitializer {
 			if (ThreadLocalRandom.current().nextDouble() > DEATH_SAVE_CHANCE) return true;
 
 			//bump health above 0 to stop death
-			player.setHealth(1.0f);
-			debug(player, "Death Prevented (Lethal Damage Intercepted)");
+
+			float clutch = (float) (1.0f + ThreadLocalRandom.current().nextDouble() * 4.0f);
+			player.setHealth(Math.min(player.getMaxHealth(), clutch));
+
+			//player.setHealth(1.0f);           <---- Set clutch to half a hearth
+			debug(player, String.format("Death Prevented: Clutch HP set to %.1f", clutch));
 
 
 			markTriggered(player);
@@ -71,13 +77,19 @@ public class Subtleguardian implements ModInitializer {
 
 			//0.5 -> 2.5 health
 			float heal = (float) (0.5f + ThreadLocalRandom.current().nextDouble() * 2.0f);
-			float newHealth = Math.min(player.getMaxHealth(), player.getHealth() + heal);
-			player.setHealth(newHealth);
+	//marked out to test micro heal		//float newHealth = Math.min(player.getMaxHealth(), player.getHealth() + heal);
+	//marked out to test micro heal		//player.setHealth(newHealth);
 			debug(player, String.format("Micro-Heal Applied (+%.1f)", heal));
 
-			markTriggered(player);
+			//micro heal added BELOW
+			startStealthRegen(player, heal);
+			markTriggered(player);			// <--- Keep w/ micro heal too
 
 		});
+
+		//regen tick register
+		ServerTickEvents.END_SERVER_TICK.register(server -> tickRegen(server));
+
 
 		LOGGER.info("SubtleGuardian hooks registered!");
 	}
@@ -85,7 +97,7 @@ public class Subtleguardian implements ModInitializer {
 	//default fields
 
 	//debug in chat
-	private static final boolean DEBUG_CHAT = false;
+	private static final boolean DEBUG_CHAT = true;
 
 	//cooldown so saves don't happen constantly (ms)
 	private static final long SAVE_COOLDOWN_MS = 4162;
@@ -96,6 +108,19 @@ public class Subtleguardian implements ModInitializer {
 	//chance to do a tiny "damage reduction" with micro-heal after hit
 	private static final double MICRO_HEAL_CHANCE = 0.15;
 
+	//stealth regen timings
+	private static final int REGEN_MIN_TICKS = 6;
+	private static final int REGEN_MAX_TICKS = 14;
+
+	//UUID -> remaining ticks, heal per tick
+	private static final Map<UUID, RegenState> activeRegen = new HashMap<>();
+
+
+
+
+
+
+	//hash map to seperate per-player
 	private static final Map<UUID, Long> lastSaveTime = new HashMap<>();
 
 
@@ -115,6 +140,7 @@ public class Subtleguardian implements ModInitializer {
 
 	}
 
+	//debug in chat function
 	private static void debug(Player player, String message) {
 
 		if (!DEBUG_CHAT) return;
@@ -124,6 +150,81 @@ public class Subtleguardian implements ModInitializer {
 			serverPlayer.sendSystemMessage(Component.literal("[SG] " + message));
 
 		}
+
+	}
+
+	//regen tick function
+	private static class RegenState {
+
+		int ticksLeft;
+		float healPerTick;
+
+		RegenState(int ticksLeft, float healPerTick) {
+
+			this.ticksLeft = ticksLeft;
+			this.healPerTick = healPerTick;
+
+		}
+
+	}
+
+	private static void startStealthRegen(Player player, float totalHeal) {
+
+		if (totalHeal <= 0.0f) return;
+
+		int ticks = ThreadLocalRandom.current().nextInt(REGEN_MIN_TICKS, REGEN_MAX_TICKS + 1);
+		float perTick = totalHeal / (float) ticks;
+		debug(player, String.format("Stealth Regen: Total=+%.1f over %d ticks (%.2f/tick)", totalHeal, ticks, perTick));
+
+
+		activeRegen.put(player.getUUID(), new RegenState(ticks, perTick));
+
+	}
+
+	private static void tickRegen(net.minecraft.server.MinecraftServer server) {
+
+		if (activeRegen.isEmpty()) return;
+
+		//iterate and remove completed entries
+		
+		var iter = activeRegen.entrySet().iterator();
+		
+		while (iter.hasNext()) {
+
+			var entry = iter.next();
+			UUID uuid = entry.getKey();
+			RegenState state = entry.getValue();
+
+			var serverPlayer = server.getPlayerList().getPlayer(uuid);
+
+			if (serverPlayer == null || !serverPlayer.isAlive()) {
+
+				iter.remove();
+				continue;
+
+			}
+
+			float max = serverPlayer.getMaxHealth();
+			float cur = serverPlayer.getHealth();
+
+			if (cur < max) {
+
+				float newHealth = Math.min(max, cur + state.healPerTick);
+				serverPlayer.setHealth(newHealth);
+
+			}
+
+			state.ticksLeft--;
+
+			if (state.ticksLeft <= 0) {
+
+				debug(serverPlayer, "Stealth Regen Finished!");
+				iter.remove();
+
+			}
+
+		}
+
 
 	}
 
